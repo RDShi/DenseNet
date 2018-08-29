@@ -5,8 +5,9 @@ import numpy as np
 import sys
 import os
 import argparse
+from sklearn import metrics
 
-# os.environ["CUDA_VISIBLE_DEVICES"]="5,6,7"
+# os.environ["CUDA_VISIBLE_DEVICES"]="9"
 
 def unpickle(fid):
     with open(fid, 'rb') as fo:
@@ -63,27 +64,29 @@ def transition_layer(x, scope, reduction=0.5, keep_prob=1):
         print(scope,x)
         return x
 
+def load_data(args, mode):
+    fid = args.fid+mode
+    data = unpickle(fid)
+    n_class = args.nclass
+
+    feats = data["data"].astype(np.float64)
+    labs = data["fine_labels"]
+    feats = np.reshape(np.transpose(np.reshape(feats, [-1 ,3,1024]), (0, 2, 1)), [-1,32,32,3])
+    if args.onlyevalue == 1:
+        return feats,labs
+    labs = tflearn.data_utils.to_categorical(labs, n_class)
+    return feats,labs
+
+
 def main(args):
     # Data loading
-    fid = "/data/srd/data/Image/cifar-100-python/train"
+    fid = args.fid+"train"
     data = unpickle(fid)
-    # print(data.keys())
-    n_class = 100
+    n_class = args.nclass
 
-    train_feats = data["data"].astype(np.float64)
-    # labs = data["labels"]
-    train_labs = data["fine_labels"]
-    train_feats = np.reshape(np.transpose(np.reshape(train_feats, [-1 ,3,1024]), (0, 2, 1)), [-1,32,32,3])
-    train_labs = tflearn.data_utils.to_categorical(train_labs, n_class)
+    train_feats, train_labs = load_data(args, "train")
+    test_feats, test_labs = load_data(args, "test")
 
-    fid = "/data/srd/data/Image/cifar-100-python/test"
-    data = unpickle(fid)
-
-    test_feats = data["data"].astype(np.float64)
-    # labs = data["labels"]
-    test_labs = data["fine_labels"]
-    test_feats = np.reshape(np.transpose(np.reshape(test_feats, [-1 ,3,1024]), (0, 2, 1)), [-1,32,32,3])
-    test_labs = tflearn.data_utils.to_categorical(test_labs, n_class)
 
     # Real-time data preprocessing
     mean = [129.30416561, 124.0699627, 112.43405006]
@@ -121,7 +124,10 @@ def main(args):
     net = tflearn.batch_normalization(net, scope='linear_batch')
     net = tf.nn.relu(net)
     net = tflearn.global_avg_pool(net)
-    net = tflearn.fully_connected(net, n_class, activation='softmax', regularizer='L2', weight_decay=1e-4)
+    if args.finetune == 1:
+        net = tflearn.fully_connected(net, n_class, activation='softmax', regularizer='L2', weight_decay=1e-4, restore=False)
+    else:
+        net = tflearn.fully_connected(net, n_class, activation='softmax', regularizer='L2', weight_decay=1e-4)
 
     # Optimizer
     opt = tf.train.MomentumOptimizer(learning_rate=args.lr, momentum=0.9, use_nesterov=True)
@@ -134,20 +140,31 @@ def main(args):
 
     # Training
     config = tf.ConfigProto()
+    config.allow_soft_placement=True
     config.gpu_options.allow_growth = True
     tf.add_to_collection(tf.GraphKeys.GRAPH_CONFIG, config)
     model = tflearn.DNN(net, checkpoint_path='/data/srd/models/image/model_'+args.model_name+'/model',
                         tensorboard_dir='/data/srd/logs/image/log_'+args.model_name,
                         max_checkpoints=3, tensorboard_verbose=0, clip_gradients=0.0)
 
+    if args.onlyevalue == 1:
+        model.load("/data/srd/models/image/"+args.pre_train+"/model.tfl")
+        n_test = len(test_feats)
+        n_batch = 10
+        batch_size = n_test/10
+        labsp = model.predict(test_feats[0:batch_size])
+        for i in range(1,10):
+            labsp = np.vstack([labsp, model.predict(test_feats[i*batch_size:(i+1)*batch_size])])
+        print(metrics.classification_report(test_labs, np.argmax(labsp,1)))
+        print("acc:", metrics.accuracy_score(test_labs, np.argmax(labsp,1)))
+
+        np.argmax(labsp,1).tofile("/data/srd/data/cifar/"+args.pre_train+".bin")
+
+        return
+
     # pre-train model
     if args.pre_train:
         model.load("/data/srd/models/image/"+args.pre_train+"/model.tfl", weights_only=True)
-    # model.load("/data/srd/models/image/model_densenet75_cifar100/densenet.tfl")
-    # model.load("/data/srd/models/image/model_densenet225_cifar100/densenet.tfl", weights_only=True)
-    # model.load("/data/srd/models/image/model_densenet226_cifar100/densenet.tfl")
-
-
     try:
         model.fit(train_feats, train_labs, n_epoch=args.epoch, validation_set=(test_feats, test_labs),
                   snapshot_epoch=False, snapshot_step=500, show_metric=True, batch_size=64, shuffle=True,
@@ -166,6 +183,10 @@ def parse_arguments(argv):
     parser.add_argument('--pre_train', type=str, help='pre train model', default=None)
     parser.add_argument('--lr', type=float, help='learning rate', default=0.1)
     parser.add_argument('--epoch', type=int, help='max epoch', default=1000)
+    parser.add_argument('--onlyevalue', type=int, help='only evalue or note', default=0)
+    parser.add_argument('--fid', type=str, help='train and test file path', default='/data/srd/data/Image/cifar-100-python/')
+    parser.add_argument('--nclass', type=int, help='number of class', default=100)
+    parser.add_argument('--finetune', type=int, help='finetune or not', default=0)
 
     return parser.parse_args(argv)
 
